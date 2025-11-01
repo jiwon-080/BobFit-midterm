@@ -1,14 +1,15 @@
 import sqlite3
 import pandas as pd
 import json
-import os
+import os # 1. os 임포트
+from dotenv import load_dotenv # 2. load_dotenv 임포트
 import google.generativeai as genai # Gemini API 라이브러리
 import random
 
 # --- 1. 설정 ---
 DB_PATH = 'recipe_db.sqlite'
-# [중요!] 본인의 API 키를 여기에 붙여넣으세요.
-YOUR_API_KEY = "AIzaSyCYevX2KdSoYPRWT3GtOzYEsADT8NkfZ7s"
+
+YOUR_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ----------------------------------------------------
 # [★] 추천받을 사용자를 ID로 선택하세요 (1~5)
