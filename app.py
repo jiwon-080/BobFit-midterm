@@ -9,7 +9,7 @@ from datetime import date
 # -----------------------------------------------------------
 try:
     # (API 키, DB 경로, 모든 함수를 'backend'라는 이름으로 가져옴)
-    import with_gemapi_py_ver as backend 
+    import recommend_gemini as backend 
 except ImportError:
     st.error("오류: 'recommend_gemini.py' 파일을 찾을 수 없습니다.")
     st.stop()
