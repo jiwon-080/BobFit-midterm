@@ -45,7 +45,18 @@ st.title("🥗 BobFit: AI 기반 맞춤 식단 추천")
 st.caption(f"오늘 날짜: {date.today().strftime('%Y년 %m월 %d일')}")
 
 # [신규] 탭(Tab) UI 생성
-tab1, tab2 = st.tabs([" 🧑‍🍳 식단 추천받기 ", " 📝 신규 프로필 가입 "])
+tab1, tab2, tab3 = st.tabs([" 🧑‍🍳 식단 추천받기 ", " 📝 신규 프로필 가입 ", " 📈 마이페이지 "])
+
+# [신규] 앱이 시작될 때 DB 테이블 셋업 함수를 한 번 호출
+# (앱이 실행될 때마다 호출되지만, 'CREATE TABLE IF NOT EXISTS'이므로 안전합니다)
+try:
+    conn = sqlite3.connect(backend.DB_PATH)
+    backend.setup_database(conn)
+except Exception as e:
+    st.error(f"DB 셋업 실패: {e}")
+finally:
+    if 'conn' in locals() and conn:
+        conn.close()
 
 # --- 3A. [추천받기] 탭 ---
 with tab1:
@@ -75,39 +86,75 @@ with tab1:
                 col2.metric("👍 기호", profile['preferences'])
                 col3.metric("🚫 알레르기", profile['restrictions_allergies'])
                 col3.metric("🚫 기타 제약", profile['restrictions_other'])
+                
+        # -----------------------------------------------------------
+        # [신규 기능] 3A-3. 동적 입력 (기분, 날짜, 자율 입력)
+        # -----------------------------------------------------------
+        st.divider() # 구분선
+        
+        # 1. "오늘의 시간 API" (Python datetime)
+        today = date.today()
+        today_date_str = today.strftime("%Y년 %m월 %d일")
+        
+        # 2. 오늘의 기분 (선택)
+        mood_options = ["-", "기분 좋음 😊", "평범함 😐", "피곤함 😴", "스트레스 🔥"]
+        mood = st.selectbox("오늘의 기분은 어떠신가요?", mood_options)
 
-        # 3A-3. 추천 실행 버튼
-        if st.button("🤖 AI로 일주일 식단 추천받기"):
+        # 3. 자율 입력
+        free_text = st.text_input(
+            "특별히 원하는 요청사항을 적어주세요 (선택 사항)", 
+            placeholder="예: 비 오는 날이라 따뜻한 국물이 먹고 싶어요"
+        )
+
+
+        # 3A-4. 추천 실행 버튼
+        if st.button("✨ AI로 오늘의 식단 추천받기"):
             if profile:
                 st.session_state.recommendation = ""
                 st.session_state.tasks_checked = 0
                 st.session_state.votes = {} # [기능 3] 보팅 초기화
                 
-                with st.spinner("1차 필터링 및 Gemini API 호출 중... (최대 30초 소요)"):
+                with st.spinner("1차 필터링 및 '취향 저격' 후보군(ML) 선정 중..."):
                     try:
-                        # [핵심 실행] 4단계 백엔드 로직 호출
+                        # 1. 1차 필터링 (동일)
                         restrictions = backend.parse_restrictions(profile)
                         filtered_recipes = backend.recommend_recipes_by_filter(conn, profile, restrictions)
                         
                         if filtered_recipes.empty:
                             st.error("1차 필터링 결과, 추천할 레시피가 없습니다.")
                         else:
-                            sample_size = min(100, len(filtered_recipes))
-                            candidate_recipes = filtered_recipes.sample(n=sample_size, random_state=42)
-                            
-                            recommendation_text = backend.get_gemini_recommendation(
-                                backend.YOUR_API_KEY, 
-                                profile,
-                                candidate_recipes
+                            # -------------------------------------------------
+                            # [핵심 수정!]
+                            # 2. (랜덤 샘플링 대신) "스마트" 후보군 선정 (ML 함수 호출)
+                            candidate_recipes = backend.get_smart_candidates(
+                                profile, filtered_recipes, top_n=100
                             )
+                            # -------------------------------------------------
+
+                            # (스피너 텍스트 변경)
+                            with st.spinner("Gemini API 호출 중... (AI가 식단 구성 중)"):
+                                # 3. 2차 (Gemini) 추천 (동일)
+                                recommendation_text = backend.get_gemini_recommendation(
+                                    backend.YOUR_API_KEY, 
+                                    profile,
+                                    candidate_recipes,
+                                    today_date_str, 
+                                    mood,           
+                                    free_text       
+                                )
                             
                             if recommendation_text:
-                                # [기능 2, 3] 추천된 레시피 원본(후보군)과 AI 답변을 모두 저장
+                                # 1. AI 텍스트(recommendation_text)를 session_state에 저장
                                 st.session_state.recommendation = recommendation_text
-                                st.session_state.candidates_df = candidate_recipes # 상세정보 표시에 사용
+                                
+                                # 2. 100개 후보군(candidates_df)을 session_state에 저장
+                                st.session_state.candidates_df = candidate_recipes
+                                
+                                # 3. "성공" 메시지는 화면에 그냥 표시 (저장 X)
                                 st.success("AI 추천이 완료되었습니다!")
                             else:
                                 st.error("Gemini API 호출에 실패했습니다.")
+                                
                     except Exception as e:
                         st.error(f"추천 중 오류 발생: {e}")
             else:
@@ -116,16 +163,15 @@ with tab1:
         # 3A-4. 추천 결과 및 리워드 UI (기능 2, 3 포함하여 수정됨)
         if st.session_state.recommendation:
             
-            st.divider()
+            st.divider() # 구분선
             st.subheader(f"🎉 {profile['username']}님을 위한 AI 추천 식단")
-            
-            # (Gemini가 생성한 텍스트를 마크다운 형식으로 예쁘게 표시)
-            st.markdown(st.session_state.recommendation) 
-
-            # -----------------------------------------------------------
-            # [기능 2 & 3] 레시피 상세정보(토글) 및 보팅 기능
-            # -----------------------------------------------------------
-            st.divider()
+        
+            # [수정 2]
+            # AI가 보낸 줄바꿈(\n)을 Markdown 강제 줄바꿈(공백2개+\n)으로 변경
+            formatted_text = st.session_state.recommendation.replace('\n', '  \n')
+            st.markdown(formatted_text) 
+        
+            st.divider() # 다음 섹션 구분선
             st.subheader("🔍 레시피 상세 정보 및 평가")
             
             # ⚠️ 중요: 데이터 한계 (열량/조리법 정보)
@@ -133,67 +179,121 @@ with tab1:
             현재 DB에는 '열량(칼로리)' 및 '상세 조리법' 데이터가 없습니다. 
             (1단계 전처리 시, 원본 CSV에 해당 정보가 없었습니다.)
             
-            데모에서는 **주요 재료 정보(`ingredients_json`)**를 대신 표시합니다.
+            데모에서는 주요 재료 정보(`ingredients_json`)를 대신 표시합니다.
             """)
 
             # AI가 추천한 텍스트에 포함된 레시피(후보군 100개 중)만 찾아서 표시
+            # 1. AI 응답 텍스트와 100개 후보 DataFrame을 가져옴
+
             rec_text = st.session_state.recommendation
-            if 'candidates_df' in st.session_state:
-                # 후보군(100개) DataFrame을 순회
-                for index, row in st.session_state.candidates_df.iterrows():
-                    recipe_title = row['RCP_TTL']
+            candidates_df = st.session_state.get('candidates_df', pd.DataFrame())
+
+            if not candidates_df.empty:
+                import re 
+                displayed_sno = set() 
+                
+                for index, row in candidates_df.iterrows():
                     
-                    # AI가 생성한 추천 텍스트에 이 레시피의 제목이 포함되어 있다면
-                    if recipe_title in rec_text:
+                    recipe_id = row['RCP_SNO']
+                    recipe_title_full = str(row['RCP_TTL']) # 1. 원본 제목 (예: "[단호박...]")
+                    clean_name = str(row['CKG_NM'])      # 2. 핵심 요리명 (예: "단호박에그슬럿")
+                    
+                    # --- [핵심] 하이브리드 매칭 ---
+                    match_found = False
+                    
+                    # 1. AI 응답에 '원본 제목'이 통째로 있는지 확인
+                    if recipe_title_full in rec_text:
+                        match_found = True
+                    
+                    # 2. 1번이 실패하면, '핵심 요리명'이 있는지 재확인
+                    #    (단, 요리명이 유효한 경우만)
+                    elif (pd.notna(clean_name) and len(clean_name) > 1) and (clean_name in rec_text):
+                        match_found = True
+                    # ------------------------------
+
+                    # 3. 둘 중 하나라도 성공하고, 아직 표시되지 않았다면
+                    if match_found and recipe_id not in displayed_sno:
+                        displayed_sno.add(recipe_id)
                         
-                        # [기능 2] 토글(expander) 생성
-                        with st.expander(f"**{recipe_title}** (상세보기)"):
+                        with st.expander(f"**{recipe_title_full}** (상세보기)"):
                             
                             # (1) 재료 정보 표시
                             st.markdown("##### 🥑 주요 재료")
                             try:
-                                # JSON 문자열 -> Python 딕셔너리 -> DataFrame
                                 ingredients_dict = json.loads(row['ingredients_json'])
                                 st.dataframe(pd.Series(ingredients_dict), use_container_width=True)
                             except:
-                                st.text(row['ingredients_json']) # 파싱 실패 시 원본 표시
+                                st.text(row['ingredients_json'])
                             
                             # (2) 기타 정보 표시
                             st.markdown("#####  E.T.C")
+                            
+                            # [디버그 1 수정]
+                            # row['CKG_MTH_ACTO_NM'] -> row['CKG_TIME_NM']로 수정
                             st.text(f"조리법: {row['CKG_MTH_ACTO_NM']} | 소요시간: {row['CKG_TIME_NM']} | 인분: {row['CKG_INBUN_NM']}")
 
                             # [기능 3] 보팅 버튼
                             st.markdown("##### ⭐ 평가하기")
-                            
-                            # 'key='를 이용해 각 버튼을 고유하게 만듦
-                            # (RCP_SNO는 레시피 고유 ID)
-                            recipe_id = row['RCP_SNO']
                             key_like = f"like_{recipe_id}"
                             key_dislike = f"dislike_{recipe_id}"
                             
                             col1, col2, _ = st.columns([1, 1, 5])
                             
+                            # [수정] 버튼 클릭 시 backend.save_vote 함수 호출
                             if col1.button("👍 Like", key=key_like):
-                                st.session_state.votes[recipe_title] = "Like"
-                                st.toast(f"'{recipe_title}' 👍 추천!")
-                                
+                                with sqlite3.connect(backend.DB_PATH) as conn:
+                                    backend.save_vote(conn, profile['user_id'], recipe_id, "Like")
+                                st.toast(f"'{recipe_title_full}' 👍 추천! (저장됨)")
+                                    
                             if col2.button("👎 Dislike", key=key_dislike):
-                                st.session_state.votes[recipe_title] = "Dislike"
-                                st.toast(f"'{recipe_title}' 👎 비추천")
+                                with sqlite3.connect(backend.DB_PATH) as conn:
+                                    backend.save_vote(conn, profile['user_id'], recipe_id, "Dislike")
+                                st.toast(f"'{recipe_title_full}' 👎 비추천 (저장됨)")
+                
+                # 4. 만약 7개 중 일부만 매칭되었다면 (디버깅)
+                if len(displayed_sno) < 7 and len(displayed_sno) > 0:
+                    st.warning(f"AI가 7개를 추천했지만, {len(displayed_sno)}개만 후보군과 매칭되었습니다.")
+                elif len(displayed_sno) == 0:
+                    st.error("AI가 추천한 레시피를 후보군(100개)과 매칭하는 데 실패했습니다.")
+                    with st.expander("AI가 보낸 원본 응답 보기 (디버깅용)"):
+                        st.code(rec_text)
 
             # 3A-5. 리워드 UI (기존과 동일)
             st.divider()
             st.subheader("🗓️ 7일 실천 리워드")
             
+            # [수정] DB에서 현재 달성 횟수를 불러옴
+            with sqlite3.connect(backend.DB_PATH) as conn:
+                checked_count = backend.get_my_rewards(conn, profile['user_id'])
+            
             tasks = [f"{i+1}일차: 식단 실천 완료" for i in range(7)]
-            checked_count = 0
+            
+            # [수정] 체크박스를 누를 때마다 DB에 즉시 저장
+            # (st.checkbox는 on_change 콜백을 지원함)
+            def on_checkbox_change(user_id, i):
+                # on_change 콜백이 실행되는 시점에, st.session_state의 'key'에는
+                # 체크박스의 '새로운 상태(True/False)'가 저장되어 있습니다.
+                # 7개의 체크박스 상태를 모두 다시 세어서 DB에 저장합니다.
+                current_checks = 0
+                for j in range(7):
+                    if st.session_state.get(f"task_{j}", False): # .get으로 안전하게 접근
+                        current_checks += 1
+                
+                with sqlite3.connect(backend.DB_PATH) as conn:
+                    backend.save_reward(conn, user_id, current_checks)
+
             cols = st.columns(4)
             for i, task in enumerate(tasks):
-                if cols[i % 4].checkbox(task, key=f"task_{i}"):
-                    checked_count += 1
+                cols[i % 4].checkbox(
+                    task, 
+                    value=(i < checked_count), # DB에서 불러온 값으로 초기화
+                    key=f"task_{i}",
+                    on_change=on_checkbox_change, # [신규]
+                    args=(profile['user_id'], i) # [신규]
+                )
             
+            # (UI 표시는 동일)
             st.progress(checked_count / 7.0)
-            
             if checked_count == 7:
                 st.balloons()
                 st.success("🎉 7일 달성 완료! 리워드 쿠폰(10% 할인)이 발급되었습니다! 🎁")
@@ -290,6 +390,43 @@ with tab2:
                 st.info("이제 [식단 추천받기] 탭으로 이동하여 새로고침(F5)하면, 본인 이름이 목록에 나타납니다.")
             except Exception as e:
                 st.error(f"DB 저장 실패: {e}")
+
+
+# --- 3C. [신규] 마이페이지 탭 ---
+with tab3:
+    st.subheader(f"📈 마이페이지")
+    
+    # 1. (중요) '추천받기' 탭에서 선택한 사용자의 프로필을 그대로 사용
+    #    (selected_id 변수는 tab1에서 이미 정의되었음)
+    if 'profile' in locals() and profile:
+        st.info(f"현재 **{profile['username']}**(ID:{profile['user_id']}) 님의 정보를 보고 있습니다.")
+        
+        col1, col2 = st.columns(2)
+        
+        # --- 2. 내가 '좋아요' 한 레시피 ---
+        with col1:
+            st.markdown("#### 👍 내가 '좋아요' 한 레시피")
+            with sqlite3.connect(backend.DB_PATH) as conn:
+                liked_recipes_df = backend.get_my_votes(conn, profile['user_id'])
+            
+            if liked_recipes_df.empty:
+                st.write("아직 '좋아요' 한 레시피가 없습니다.")
+            else:
+                st.dataframe(liked_recipes_df, use_container_width=True)
+
+        # --- 3. 나의 '달성 기록' ---
+        with col2:
+            st.markdown("#### 🏆 나의 7일 달성 기록")
+            with sqlite3.connect(backend.DB_PATH) as conn:
+                current_rewards = backend.get_my_rewards(conn, profile['user_id'])
+            
+            st.metric(label="현재 달성일", value=f"{current_rewards} / 7 일")
+            st.progress(current_rewards / 7.0)
+            if current_rewards == 7:
+                st.success("목표 달성! 대단합니다! 🥳")
+
+    else:
+        st.warning("먼저 [식단 추천받기] 탭에서 사용자를 선택해주세요.")
 
 
 # --- 4. [신규] '신규 가입' 탭에서 사용할 DB 추가 함수 ---
