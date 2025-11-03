@@ -6,6 +6,10 @@ from dotenv import load_dotenv # 2. load_dotenv 임포트
 import google.generativeai as genai # Gemini API 라이브러리
 import random
 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+
 # --- 1. 설정 ---
 DB_PATH = 'recipe_db.sqlite'
 
@@ -350,16 +354,14 @@ def recommend_recipes_by_filter(conn, profile, restrictions):
         return pd.DataFrame()
 # --- 3. (신규) 4단계: Gemini API 호출 함수 (수정된 버전) ---
 
-def get_gemini_recommendation(api_key, profile, candidate_recipes):
+def get_gemini_recommendation(api_key, profile, candidate_recipes, today_str, mood, free_text):
     """
-    (2차 추천) Gemini API를 호출하여 최종 식단을 추천받습니다.
-    (모델명 및 프롬프트 로직 수정)
+    (2차 추천) 동적 프롬프트를 사용하여 Gemini API를 호출합니다.
     """
     try:
         genai.configure(api_key=api_key)
         
-        # 모델명
-        model = genai.GenerativeModel('models/gemini-pro-latest') 
+        model = genai.GenerativeModel('models/gemini-pro-latest')
         
         # 후보 레시피 목록을 텍스트로 변환
         recipe_list_str = "\n".join([
@@ -375,36 +377,63 @@ def get_gemini_recommendation(api_key, profile, candidate_recipes):
         - (참고) 기타 제약: {profile['restrictions_other']}
         """
 
-        # [수정 2] 프롬프트 예시를 더 일반적이고 강력하게 변경
+        # 4-1. '오늘의 컨텍스트' 문자열 생성
+        context_str = f"- 오늘은 {today_str}입니다."
+        
+        # 4-2. 기분
+        if mood != "-": # '-'가 아니면 (즉, 사용자가 기분을 선택했으면)
+            context_str += f"\n- 사용자의 현재 기분: {mood}"
+            
+        # 4-3. 자율 입력
+        if free_text: # 입력값이 있으면
+            context_str += f"\n- 사용자의 추가 요청: {free_text}"
+        else:
+            context_str += "\n- 사용자의 추가 요청: 없음"
+
+
+        # [수정] 최종 프롬프트 (새로운 [오늘의 컨텍스트] 섹션 추가)
         prompt = f"""
         당신은 BobFit의 식단 코치 전문 영양사입니다. 
-        '{profile['username']}' 님을 위한 일주일치 저녁 식단 7개를 추천해야 합니다.
+        '{profile['username']}' 님을 위한 오늘의 식단 후보(아침/점심/저녁)를 추천해야 합니다.
 
         [사용자 프로필]
         {profile_str}
+
+        [오늘의 컨텍스트]
+        {context_str}
 
         [추천 대상 레시피 후보 목록 (최대 100개)]
         {recipe_list_str}
 
         [요청 사항]
-        1. 위 후보 목록 중에서 7개의 레시피를 선택해주세요.
-        2. 선택 기준은 사용자의 [달성 목표]와 [선호 음식]을 최우선으로 고려해야 합니다.
-        
-        3. [중요] 사용자의 [달성 목표]와 [기타 제약]을 반드시 확인하세요.
-           - (예: 목표에 '다이어트'가 있다면) 칼로리가 낮거나 건강한 조리법(찜, 무침, 샐러드) 위주로 선택하세요.
-           - (예: 목표에 '단백질 섭취'가 있다면) '육류', '생선', '두부'가 포함된 메뉴를 우선 고려하세요.
-           - (예: 제약에 '조리시간 30분 이내'가 있다면) 후보 목록의 '소요시간'을 확인하여 '30분이내', '15분이내' 등 조건에 맞는 레시피만 골라야 합니다.
+        1. [오늘의 컨텍스트]를 최우선으로 고려하여 추천해주세요.
+           (예: "피곤함" 상태면 '초간단한 한 끼'를, "비 오는 날" 요청이 있으면 '따뜻한 국물' 요리를 우선 선택)
            
-        4. 추천 결과는 아래 [출력 형식]을 반드시 지켜주세요.
+        2. 아침은 비교적 간단하게 제작할 수 있는 메뉴로 추천해 주세요.
+            세 끼의 영양균형 또한 고려해 주세요.
+           
+        3. 그 다음으로 사용자의 [달성 목표]와 [선호 음식]을 고려해야 합니다.
+        
+        4. [중요] 사용자의 [달성 목표]와 [기타 제약]을 반드시 확인하세요.
+           - (예: 목표에 '다이어트'가 있다면) 칼로리가 낮거나 건강한 조리법...
+           - (예: 제약에 '조리시간 30분 이내'가 있다면) 후보 목록의 '소요시간'을 확인하여...
+        
+        5. [★매우 중요★]
+           추천하는 7개의 레시피 이름은, [추천 대상 레시피 후보 목록]에 있는 
+           '('와 ')' 사이의 (조리법: ...)을 제외한 **원본 제목과 100% 동일하게** 작성해야 합니다. 
+           (예: "- [단호박 에그슬럿 만들기 단호박 샐러드 레시피]")
+           절대 새로운 레시피 이름을 만들거나, 기존 제목을 줄여서 쓰지 마세요.
+           
+        6. 추천 결과는 아래 [출력 형식]을 반드시 지켜주세요.
 
-        [출력 형식]
-        1. [레시피명]: 이 레시피를 추천하는 이유 (달성 목표/기호와 연결지어 설명)
-        2. [레시피명]: 추천 이유
+        [출력 형식/아침후보 2개 점심후보 2개 저녁후보 3개로 총 7개의 레시피 출력]  
+        아침 1. [레시피명]: 이 레시피를 추천하는 이유 ([오늘의 컨텍스트]와 연결지어 설명)  
+        아침 2. [레시피명]: 추천 이유  
         ...
-        7. [레시피명]: 추천 이유
+        저녁 3. [레시피명]: 추천 이유  
         """
         
-        print("\nGemini API에 추천을 요청합니다...")
+        print(f"\nGemini API에 추천을 요청합니다... (모델: {model.model_name})")
         response = model.generate_content(prompt)
         
         return response.text
@@ -413,9 +442,182 @@ def get_gemini_recommendation(api_key, profile, candidate_recipes):
         print(f"❌ Gemini API 오류: {e}")
         return None
 
-# (파일의 나머지 부분(1, 2, 4단계)은 그대로 두시면 됩니다.)
 
-# --- 4. 메인 코드 실행 ---
+# --- 4. [신규 추가] DB 연동 (마이페이지) 함수 ---
+
+def setup_database(conn):
+    """
+    (최초 1회 실행) votes, rewards 테이블이 없으면 생성합니다.
+    """
+    try:
+        cursor = conn.cursor()
+        
+        # 1. '좋아요/싫어요' 투표 저장 테이블
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS votes (
+            vote_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            recipe_sno INTEGER NOT NULL,
+            vote_type TEXT NOT NULL, -- 'Like' or 'Dislike'
+            voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id),
+            FOREIGN KEY (recipe_sno) REFERENCES recipes(RCP_SNO),
+            UNIQUE(user_id, recipe_sno) -- 한 사용자가 한 레시피에 한 번만 투표
+        );
+        """)
+        
+        # 2. '7일 달성' 리워드 기록 테이블
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rewards (
+            reward_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE, -- 한 사용자당 하나의 기록
+            checked_count INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        
+        conn.commit()
+        print("✅ (DB 셋업) 'votes' 및 'rewards' 테이블 확인/생성 완료.")
+    except Exception as e:
+        print(f"❌ (DB 셋업) 테이블 생성 오류: {e}")
+        conn.rollback()
+
+def save_vote(conn, user_id, recipe_sno, vote_type):
+    """
+    '좋아요' 또는 '싫어요' 투표를 DB에 저장합니다.
+    (이미 투표했다면 덮어씁니다: INSERT OR REPLACE)
+    """
+    query = """
+    INSERT OR REPLACE INTO votes (user_id, recipe_sno, vote_type)
+    VALUES (?, ?, ?)
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, (user_id, recipe_sno, vote_type))
+        conn.commit()
+        print(f"🗳️ (DB 저장) user_id {user_id}가 recipe_sno {recipe_sno}에 '{vote_type}' 투표함.")
+    except Exception as e:
+        print(f"❌ (DB 저장) 투표 저장 오류: {e}")
+        conn.rollback()
+
+def save_reward(conn, user_id, checked_count):
+    """
+    '7일 달성' 체크박스 개수를 DB에 저장(업데이트)합니다.
+    """
+    query = """
+    INSERT OR REPLACE INTO rewards (user_id, checked_count, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, (user_id, checked_count))
+        conn.commit()
+        # print(f"🏆 (DB 저장) user_id {user_id}의 달성률 {checked_count}/7 저장.")
+    except Exception as e:
+        print(f"❌ (DB 저장) 리워드 저장 오류: {e}")
+        conn.rollback()
+
+def get_my_votes(conn, user_id):
+    """
+    (마이페이지용) 내가 'Like'한 레시피 목록을 불러옵니다.
+    """
+    query = """
+    SELECT r.RCP_TTL, r.CKG_MTH_ACTO_NM
+    FROM votes v
+    JOIN recipes r ON v.recipe_sno = r.RCP_SNO
+    WHERE v.user_id = ? AND v.vote_type = 'Like'
+    ORDER BY v.voted_at DESC
+    """
+    try:
+        # read_sql로 바로 DataFrame을 만듭니다.
+        df = pd.read_sql(query, conn, params=(user_id,))
+        return df
+    except Exception as e:
+        print(f"❌ (DB 조회) '좋아요' 목록 로딩 오류: {e}")
+        return pd.DataFrame()
+
+def get_my_rewards(conn, user_id):
+    """
+    (마이페이지용) 나의 현재 '달성' 횟수를 불러옵니다.
+    """
+    query = "SELECT checked_count FROM rewards WHERE user_id = ?"
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, (user_id,))
+        result = cursor.fetchone() # (7,) 또는 None
+        if result:
+            return result[0] # 7
+        else:
+            return 0 # 기록이 없으면 0
+    except Exception as e:
+        print(f"❌ (DB 조회) 리워드 로딩 오류: {e}")
+        return 0
+    
+# --- 5. [신규 추가]"스마트" 후보군 선정 (ML) ---
+
+def _extract_ingredients_text(json_str):
+    """(HELPER) ingredients_json에서 재료명(key)만 추출해 텍스트로 반환"""
+    try:
+        ingredients_dict = json.loads(json_str)
+        # 재료명(key)만 " "으로 묶어서 반환 (예: "두부 아보카도 간장")
+        return " ".join(ingredients_dict.keys())
+    except (json.JSONDecodeError, TypeError):
+        return "" # 파싱 실패 시 빈 텍스트 반환
+
+def get_smart_candidates(profile, filtered_recipes_df, top_n=100):
+    """
+    (ML) TF-IDF와 코사인 유사도를 사용해
+    사용자 프로필과 가장 유사한 '취향 저격' 레시피 top_n개를 반환
+    """
+    print(f"🤖 (ML) '취향 저격' 후보군 선정을 시작합니다... (대상: {len(filtered_recipes_df)}개)")
+    
+    # 1. 사용자 프로필 텍스트 생성 (비교 기준)
+    # (기호 + 목표)
+    user_text = profile['preferences'] + " " + profile['goals']
+    # 예: "한식, 일식, 채소 다이어트, 저염식"
+    
+    # 2. 레시피 재료 텍스트 생성 (비교 대상)
+    # (이 작업은 수천~수만 건이므로 시간이 조금 걸릴 수 있음)
+    recipe_texts = filtered_recipes_df['ingredients_json'].apply(_extract_ingredients_text)
+    
+    if recipe_texts.empty:
+        print("⚠️ (ML) 재료 텍스트를 추출할 수 없습니다. 랜덤 샘플링으로 대체합니다.")
+        sample_size = min(top_n, len(filtered_recipes_df))
+        return filtered_recipes_df.sample(n=sample_size, random_state=42)
+        
+    # 3. TF-IDF 벡터화
+    try:
+        vectorizer = TfidfVectorizer()
+        
+        # 3-1. 레시피(재료) 전체로 TF-IDF 어휘 사전 학습
+        tfidf_matrix_recipes = vectorizer.fit_transform(recipe_texts)
+        
+        # 3-2. 사용자 프로필 텍스트를 동일한 어휘 사전으로 변환
+        tfidf_vector_user = vectorizer.transform([user_text])
+        
+        # 4. 코사인 유사도 계산
+        # (결과 shape: [1, num_recipes])
+        cosine_sims = cosine_similarity(tfidf_vector_user, tfidf_matrix_recipes)
+        
+        # 5. 유사도 점수가 가장 높은 top_n개의 *인덱스* 찾기
+        # [0]으로 1D 배열로 만들고, argsort로 정렬 후, 상위 top_n개 선택
+        # (유사도가 0인 레시피가 많을 수 있으므로, 실제 개수(len)와 top_n 중 작은 값을 택함)
+        num_candidates = min(top_n, len(cosine_sims[0]))
+        top_indices = np.argsort(cosine_sims[0])[-num_candidates:][::-1]
+        
+        # 6. 상위 top_n개 레시피 DataFrame 반환
+        smart_candidates_df = filtered_recipes_df.iloc[top_indices]
+        
+        print(f"✅ (ML) '취향 저격' 후보군 {len(smart_candidates_df)}개 선정 완료.")
+        return smart_candidates_df
+        
+    except Exception as e:
+        print(f"❌ (ML) TF-IDF/유사도 계산 실패: {e}. 랜덤 샘플링으로 대체합니다.")
+        sample_size = min(top_n, len(filtered_recipes_df))
+        return filtered_recipes_df.sample(n=sample_size, random_state=42)
+    
+# --- 6. 메인 코드 실행(api 호출 테스트용) ---
+
 if __name__ == "__main__":
     
     if "YOUR_API_KEY" in YOUR_API_KEY:
