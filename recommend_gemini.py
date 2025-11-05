@@ -361,7 +361,7 @@ def get_gemini_recommendation(api_key, profile, candidate_recipes, today_str, mo
     try:
         genai.configure(api_key=api_key)
         
-        model = genai.GenerativeModel('models/gemini-pro-latest')
+        model = genai.GenerativeModel('models/gemini-flash-latest')
         
         # 후보 레시피 목록을 텍스트로 변환
         recipe_list_str = "\n".join([
