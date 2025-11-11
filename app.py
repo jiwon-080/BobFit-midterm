@@ -38,8 +38,34 @@ def get_user_list(conn):
     except Exception as e:
         st.error(f"DB에서 사용자 목록 로드 실패: {e}")
         return []
+    
+# --- 3. '신규 가입' 탭에서 사용할 DB 추가 함수 ---
 
-# --- 3. Streamlit UI 그리기 ---
+def add_user_to_db(profile_data):
+    """
+    st.form에서 받은 튜플을 'users' DB에 INSERT합니다.
+    (이전 add_user.py 스크립트와 동일한 로직)
+    """
+    query = """
+    INSERT INTO users (username, preferences, restrictions_allergies, restrictions_other, goals) 
+    VALUES (?, ?, ?, ?, ?)
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(backend.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(query, profile_data)
+        conn.commit()
+    except Exception as e:
+        # 오류 발생 시, 롤백하고 오류를 다시 발생시켜 상위(UI)에서 처리
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            conn.close()
+
+# --- 4. Streamlit UI 그리기 ---
 
 st.title("🥗 BobFit: AI 기반 맞춤 식단 추천")
 st.caption(f"오늘 날짜: {date.today().strftime('%Y년 %m월 %d일')}")
@@ -427,31 +453,3 @@ with tab3:
 
     else:
         st.warning("먼저 [식단 추천받기] 탭에서 사용자를 선택해주세요.")
-
-
-# --- 4. [신규] '신규 가입' 탭에서 사용할 DB 추가 함수 ---
-# (이 코드는 app.py의 맨 마지막, 전역 레벨에 추가합니다)
-
-def add_user_to_db(profile_data):
-    """
-    st.form에서 받은 튜플을 'users' DB에 INSERT합니다.
-    (이전 add_user.py 스크립트와 동일한 로직)
-    """
-    query = """
-    INSERT INTO users (username, preferences, restrictions_allergies, restrictions_other, goals) 
-    VALUES (?, ?, ?, ?, ?)
-    """
-    conn = None
-    try:
-        conn = sqlite3.connect(backend.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(query, profile_data)
-        conn.commit()
-    except Exception as e:
-        # 오류 발생 시, 롤백하고 오류를 다시 발생시켜 상위(UI)에서 처리
-        if conn:
-            conn.rollback()
-        raise e
-    finally:
-        if conn:
-            conn.close()
