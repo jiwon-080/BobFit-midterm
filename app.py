@@ -2,9 +2,15 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import date
+import os
+import sys
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.append(script_dir)
+    
 # -----------------------------------------------------------
-# [중요] 4단계에서 만든 백엔드 로직 파일(recommend_gemini.py)에서 
+# 백엔드 로직 파일(recommend_gemini.py)에서 
 # 핵심 함수들을 import (가져오기) 합니다.
 # -----------------------------------------------------------
 try:
