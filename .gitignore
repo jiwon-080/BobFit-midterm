@@ -1,5 +1,5 @@
 .env
 .vscode/
+.devcontainer/
 __pycache__/
 *.csv
-.devcontainer/

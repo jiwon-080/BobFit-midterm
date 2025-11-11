@@ -4,20 +4,30 @@ import pandas as pd
 from datetime import date
 import os
 import sys
+import importlib.util
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-if script_dir not in sys.path:
-    sys.path.append(script_dir)
-    
-# -----------------------------------------------------------
-# 백엔드 로직 파일(recommend_gemini.py)에서 
-# 핵심 함수들을 import (가져오기) 합니다.
-# -----------------------------------------------------------
 try:
-    # (API 키, DB 경로, 모든 함수를 'backend'라는 이름으로 가져옴)
-    import recommend_gemini as backend 
-except ImportError:
-    st.error("오류: 'recommend_gemini.py' 파일을 찾을 수 없습니다.")
+    # 1. 현재 app.py 파일이 있는 폴더의 절대 경로를 찾음
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 2. 백엔드 파일의 전체 경로를 생성
+    backend_file_path = os.path.join(script_dir, 'recommend_gemini.py')
+
+    # 3. importlib를 사용해 해당 경로의 파일을 'backend'라는 이름의 모듈로 강제 로드
+    spec = importlib.util.spec_from_file_location("backend", backend_file_path)
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+    
+    # 4. (확인) 로드 성공 시, Streamlit 경로에도 강제 추가
+    if script_dir not in sys.path:
+        sys.path.append(script_dir)
+        
+    print("✅ (디버그) 'recommend_gemini.py' 모듈 강제 로드 성공.")
+
+except Exception as e:
+    # 이 오류가 뜨면, GitHub에 파일이 없거나 이름이 다른 것입니다.
+    st.error(f"오류: 'recommend_gemini.py' 파일을 강제로 로드하는 데 실패했습니다.")
+    st.error(f"오류 상세: {e}")
     st.stop()
 
 # --- 1. 앱 기본 설정 ---
