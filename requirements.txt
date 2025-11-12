@@ -3,3 +3,4 @@ pandas
 google-generativeai
 xgboost
 scikit-learn
+python-dotenv
