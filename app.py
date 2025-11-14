@@ -3,6 +3,9 @@ import sqlite3
 import pandas as pd
 from datetime import date
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # -----------------------------------------------------------
 # [중요] 4단계에서 만든 백엔드 로직 파일(recommend_gemini.py)에서 
 # 핵심 함수들을 import (가져오기) 합니다.
