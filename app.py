@@ -7,6 +7,13 @@ import os
 import sys
 import importlib.util
 
+from dotenv import load_dotenv
+load_dotenv()
+
+# -----------------------------------------------------------
+# [중요] 4단계에서 만든 백엔드 로직 파일(recommend_gemini.py)에서 
+# 핵심 함수들을 import (가져오기) 합니다.
+# -----------------------------------------------------------
 try:
     # 1. 현재 app.py 파일이 있는 폴더의 절대 경로를 찾음
     script_dir = os.path.dirname(os.path.abspath(__file__))
