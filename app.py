@@ -168,24 +168,38 @@ with tab1:
                 st.session_state.tasks_checked = 0
                 st.session_state.votes = {} # [기능 3] 보팅 초기화
                 
-                with st.spinner("1차 필터링 및 '취향 저격' 후보군(ML) 선정 중..."):
+                with st.spinner("제약 조건을 필터링하고, AI가 사용자님의 기분을 분석하고 있습니다..."):
                     try:
-                        # 1. 1차 필터링 (동일)
+                        # 1. 1차 필터링 (기존 동일)
                         restrictions = backend.parse_restrictions(profile)
                         filtered_recipes = backend.recommend_recipes_by_filter(conn, profile, restrictions)
                         
                         if filtered_recipes.empty:
-                            st.error("1차 필터링 결과, 추천할 레시피가 없습니다.")
+                            st.error("1차 필터링 결과...")
                         else:
                             # -------------------------------------------------
-                            # [핵심 수정!]
-                            # 2. (랜덤 샘플링 대신) "스마트" 후보군 선정 (ML 함수 호출)
-                            candidate_recipes = backend.get_smart_candidates(
-                                profile, filtered_recipes, top_n=100
-                            )
+                            # [신규] 1. 자율 입력 분석
                             # -------------------------------------------------
-
-                            # (스피너 텍스트 변경)
+                            dynamic_keywords = ""
+                            if free_text: # 사용자가 자율 입력을 썼다면
+                                dynamic_keywords = backend.extract_keywords_with_gemini(
+                                    backend.YOUR_API_KEY, 
+                                    free_text
+                                )
+                                if dynamic_keywords:
+                                    st.toast(f"💡 분석된 키워드: {dynamic_keywords}")
+                            
+                            # -------------------------------------------------
+                            # [수정] 2. ML 후보군 선정 (키워드 전달)
+                            # -------------------------------------------------
+                            candidate_recipes = backend.get_smart_candidates(
+                                profile, 
+                                filtered_recipes, 
+                                top_n=100,
+                                dynamic_keywords=dynamic_keywords # [전달]
+                            )
+                            
+                            # 3. 최종 Gemini 추천 (기존 동일)
                             with st.spinner("Gemini API 호출 중... (AI가 식단 구성 중)"):
                                 # 3. 2차 (Gemini) 추천 (동일)
                                 recommendation_text = backend.get_gemini_recommendation(
