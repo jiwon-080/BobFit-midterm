@@ -346,7 +346,28 @@ def recommend_recipes_by_filter(conn, profile, restrictions):
             # 시간 제약이 없으면(allowed_times가 비어있으면) 재료 필터링 결과 그대로 사용
             print("시간 제약 없음. 재료 필터링 결과만 사용합니다.")
             final_filtered_df = material_filtered_df
-            
+        
+        # ---------------------------------------------------------
+        # [수정] 3. 예산 필터링 (정적 숫자 budget 사용)
+        # ---------------------------------------------------------
+        user_budget = profile.get('budget', 0) # DB에서 가져온 숫자 (없으면 0)
+    
+        if user_budget and user_budget > 0:
+            # [전략] 네이버 가격은 '대용량(묶음)' 기준일 수 있으므로, 
+            # 한 끼 예산(user_budget)의 2배까지는 후보군에 포함시켜 줍니다.
+            # (예: 내 예산 1만원 -> 재료비 합계 2만원짜리(대용량) 레시피도 일단 통과)
+            budget_limit = user_budget * 2 
+        
+            final_filtered_df = final_filtered_df[
+                (final_filtered_df['estimated_price'] <= budget_limit) | 
+                (final_filtered_df['estimated_price'].isnull()) |
+                (final_filtered_df['estimated_price'] == 0)
+            ]
+            print(f"💰 (1차-예산) {user_budget:,}원 예산 적용 -> 대용량 기준 {budget_limit:,}원 이하 {len(final_filtered_df)}개 남김.")
+    
+        else:
+            print("💰 (1차-예산) 예산 제약 없음.")
+        
         return final_filtered_df
     
     except Exception as e:
@@ -615,6 +636,52 @@ def get_smart_candidates(profile, filtered_recipes_df, top_n=100):
         print(f"❌ (ML) TF-IDF/유사도 계산 실패: {e}. 랜덤 샘플링으로 대체합니다.")
         sample_size = min(top_n, len(filtered_recipes_df))
         return filtered_recipes_df.sample(n=sample_size, random_state=42)
+    
+# -----------------------------------------------------------------
+# [신규 추가] 1순위: AI 레시피 변형 (Generative AI)
+# -----------------------------------------------------------------
+
+def modify_recipe_with_gemini(api_key, recipe_title, ingredients_json, modification_request):
+    """
+    (GenAI) 원본 레시피를 사용자의 요청(예: 저염식, 1인분)에 맞춰 변형하여 생성합니다.
+    """
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('models/gemini-flash-latest')
+        
+        # 원본 재료 파싱 (문자열 -> 보기 좋은 텍스트)
+        try:
+            ing_dict = json.loads(ingredients_json)
+            ingredients_str = ", ".join([f"{k} {v}" for k, v in ing_dict.items()])
+        except:
+            ingredients_str = ingredients_json
+
+        # [프롬프트 작성]
+        prompt = f"""
+        당신은 창의적이고 유능한 요리 연구가입니다.
+        아래의 [원본 레시피]를 사용자의 [요청 사항]에 맞춰 **새롭게 변형**해주세요.
+
+        [원본 레시피 정보]
+        - 요리명: {recipe_title}
+        - 원본 재료: {ingredients_str}
+
+        [사용자 요청 사항]
+        👉 "{modification_request}"
+
+        [작성 가이드]
+        1. 요청 사항을 반영하여 **변경된 재료 목록**을 작성하세요. (예: 1인분이면 양을 줄이고, 저염식이면 간장을 줄이거나 대체)
+        2. 변형된 레시피로 요리하는 **간단한 조리법(Step-by-Step)**을 3~5단계로 요약해서 작성하세요.
+        3. 마지막에 이 변형이 왜 좋은지 **'영양사의 한마디'**를 덧붙여주세요.
+        4. 출력 형식은 읽기 편한 **Markdown**으로 해주세요.
+        """
+        
+        print(f"🤖 (GenAI) 레시피 변형 요청: {recipe_title} -> {modification_request}")
+        response = model.generate_content(prompt)
+        return response.text
+
+    except Exception as e:
+        print(f"❌ (GenAI) 레시피 변형 실패: {e}")
+        return None
     
 # --- 6. 메인 코드 실행(api 호출 테스트용) ---
 

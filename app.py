@@ -1,6 +1,7 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import json
 from datetime import date
 
 from dotenv import load_dotenv
@@ -50,7 +51,7 @@ def add_user_to_db(profile_data):
     (이전 add_user.py 스크립트와 동일한 로직)
     """
     query = """
-    INSERT INTO users (username, preferences, restrictions_allergies, restrictions_other, goals) 
+    INSERT INTO users (username, preferences, restrictions_allergies, restrictions_other, goals, budget) 
     VALUES (?, ?, ?, ?, ?)
     """
     conn = None
@@ -113,6 +114,7 @@ with tab1:
                 col1, col2, col3 = st.columns(3)
                 col1.metric("🎯 달성 목표", profile['goals'])
                 col2.metric("👍 기호", profile['preferences'])
+                col2.metric("💸 예산 제약", profile['budget'])
                 col3.metric("🚫 알레르기", profile['restrictions_allergies'])
                 col3.metric("🚫 기타 제약", profile['restrictions_other'])
                 
@@ -260,6 +262,55 @@ with tab1:
                             # [디버그 1 수정]
                             # row['CKG_MTH_ACTO_NM'] -> row['CKG_TIME_NM']로 수정
                             st.text(f"조리법: {row['CKG_MTH_ACTO_NM']} | 소요시간: {row['CKG_TIME_NM']} | 인분: {row['CKG_INBUN_NM']}")
+                            
+                            # -------------------------------------------------------
+                            # 동적 프롬포팅 AI 레시피 변형
+                            # -------------------------------------------------------
+                            st.divider()
+                            st.markdown("##### 💬 AI 레시피 변형 (Generative Mode)")
+                                
+                            # 1. 변형 옵션 선택 (Selectbox + Custom Input)
+                            mod_option = st.selectbox(
+                                "어떻게 바꿔드릴까요?",
+                                [
+                                    "선택하세요",
+                                    "🥣 1인분으로 양 조절해줘",
+                                    "🧂 저염식 버전으로 바꿔줘",
+                                    "🍎 다이어트 버전으로 바꿔줘",
+                                    "👶 아이도 먹을 수 있게 맵지 않게 해줘",
+                                    "🍳 자취생용 초간단 버전으로 바꿔줘",
+                                    "📝 (직접 입력)"
+                                ],
+                                key=f"mod_sel_{recipe_id}" # 고유 Key 필수
+                            )
+                                
+                            custom_mod = ""
+                            if mod_option == "📝 (직접 입력)":
+                                custom_mod = st.text_input("원하는 요청사항을 입력하세요:", key=f"mod_txt_{recipe_id}")
+                            
+                            # 2. 변형 버튼
+                            if st.button("✨ AI로 레시피 다시 쓰기", key=f"mod_btn_{recipe_id}"):
+                                # 실제 요청 내용 결정
+                                final_request = custom_mod if mod_option == "📝 (직접 입력)" else mod_option
+                                
+                                if final_request and final_request != "선택하세요":
+                                    with st.spinner("AI가 새로운 레시피를 생성 중입니다... 🍳"):
+                                        # 백엔드 함수 호출
+                                        modified_result = backend.modify_recipe_with_gemini(
+                                            backend.YOUR_API_KEY,
+                                            recipe_title_full,
+                                            row['ingredients_json'],
+                                            final_request
+                                        )
+                                        
+                                        if modified_result:
+                                            st.success("생성 완료!")
+                                            st.markdown("---")
+                                            st.markdown(modified_result) # 결과 출력
+                                        else:
+                                            st.error("변형에 실패했습니다. 다시 시도해주세요.")
+                                else:
+                                    st.warning("변형 옵션을 선택하거나 입력해주세요.")
 
                             # [기능 3] 보팅 버튼
                             st.markdown("##### ⭐ 평가하기")
@@ -367,6 +418,15 @@ with tab2:
             '저염식', '당뇨', '채식', '비건', '이슬람교', '힌두교', '할랄'
         ]
         
+        # --- 예산 설정 ---
+        new_budget = st.number_input(
+            "한 끼당 최대 예산 (원)", 
+            min_value=0, 
+            step=5000, 
+            value=0,
+            help="0원으로 설정하면 예산 제한이 없습니다."
+        )
+        
         selected_other_constraints = []
         cols = st.columns(4) # 4열로 배치
         for i, constraint in enumerate(OTHER_CONSTRAINT_LIST):
@@ -409,7 +469,8 @@ with tab2:
                 new_preferences_str,
                 new_allergies_str, # 변환된 문자열
                 new_other_str,     # 변환된 문자열
-                new_goals_str
+                new_goals_str,
+                int(new_budget)
             )
             
             # 5. DB 저장 함수 호출 (app.py 맨 끝에 이미 정의되어 있음)
