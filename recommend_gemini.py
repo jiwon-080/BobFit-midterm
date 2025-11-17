@@ -586,58 +586,6 @@ def _extract_ingredients_text(json_str):
     except (json.JSONDecodeError, TypeError):
         return "" # 파싱 실패 시 빈 텍스트 반환
 
-def get_smart_candidates(profile, filtered_recipes_df, top_n=100):
-    """
-    (ML) TF-IDF와 코사인 유사도를 사용해
-    사용자 프로필과 가장 유사한 '취향 저격' 레시피 top_n개를 반환
-    """
-    print(f"🤖 (ML) '취향 저격' 후보군 선정을 시작합니다... (대상: {len(filtered_recipes_df)}개)")
-    
-    # 1. 사용자 프로필 텍스트 생성 (비교 기준)
-    # (기호 + 목표)
-    user_text = profile['preferences'] + " " + profile['goals']
-    # 예: "한식, 일식, 채소 다이어트, 저염식"
-    
-    # 2. 레시피 재료 텍스트 생성 (비교 대상)
-    # (이 작업은 수천~수만 건이므로 시간이 조금 걸릴 수 있음)
-    recipe_texts = filtered_recipes_df['ingredients_json'].apply(_extract_ingredients_text)
-    
-    if recipe_texts.empty:
-        print("⚠️ (ML) 재료 텍스트를 추출할 수 없습니다. 랜덤 샘플링으로 대체합니다.")
-        sample_size = min(top_n, len(filtered_recipes_df))
-        return filtered_recipes_df.sample(n=sample_size, random_state=42)
-        
-    # 3. TF-IDF 벡터화
-    try:
-        vectorizer = TfidfVectorizer()
-        
-        # 3-1. 레시피(재료) 전체로 TF-IDF 어휘 사전 학습
-        tfidf_matrix_recipes = vectorizer.fit_transform(recipe_texts)
-        
-        # 3-2. 사용자 프로필 텍스트를 동일한 어휘 사전으로 변환
-        tfidf_vector_user = vectorizer.transform([user_text])
-        
-        # 4. 코사인 유사도 계산
-        # (결과 shape: [1, num_recipes])
-        cosine_sims = cosine_similarity(tfidf_vector_user, tfidf_matrix_recipes)
-        
-        # 5. 유사도 점수가 가장 높은 top_n개의 *인덱스* 찾기
-        # [0]으로 1D 배열로 만들고, argsort로 정렬 후, 상위 top_n개 선택
-        # (유사도가 0인 레시피가 많을 수 있으므로, 실제 개수(len)와 top_n 중 작은 값을 택함)
-        num_candidates = min(top_n, len(cosine_sims[0]))
-        top_indices = np.argsort(cosine_sims[0])[-num_candidates:][::-1]
-        
-        # 6. 상위 top_n개 레시피 DataFrame 반환
-        smart_candidates_df = filtered_recipes_df.iloc[top_indices]
-        
-        print(f"✅ (ML) '취향 저격' 후보군 {len(smart_candidates_df)}개 선정 완료.")
-        return smart_candidates_df
-        
-    except Exception as e:
-        print(f"❌ (ML) TF-IDF/유사도 계산 실패: {e}. 랜덤 샘플링으로 대체합니다.")
-        sample_size = min(top_n, len(filtered_recipes_df))
-        return filtered_recipes_df.sample(n=sample_size, random_state=42)
-    
 # -----------------------------------------------------------------
 # [신규 추가] 1순위: AI 레시피 변형 (Generative AI)
 # -----------------------------------------------------------------
@@ -683,6 +631,108 @@ def modify_recipe_with_gemini(api_key, recipe_title, ingredients_json, modificat
     except Exception as e:
         print(f"❌ (GenAI) 레시피 변형 실패: {e}")
         return None
+
+# -----------------------------------------------------------------
+# [신규 추가] 2순위: 동적 키워드 추출 (AI 핀포인트)
+# -----------------------------------------------------------------
+
+def extract_keywords_with_gemini(api_key, user_input):
+    """
+    사용자의 자율 입력(문장)에서 검색에 사용할 핵심 식재료/요리 키워드를 추출합니다.
+    예: "비 오니까 따뜻한 국물 땡겨" -> "국물 요리 따뜻한 전골 찌개"
+    """
+    if not user_input or len(user_input) < 2:
+        return ""
+        
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('models/gemini-flash-latest')
+        
+        prompt = f"""
+        역할: 레시피 데이터베이스 검색을 위한 '스마트 키워드 추출기'
+
+        [사용자 입력]
+        "{user_input}"
+
+        [지시 사항]
+        1. 사용자의 입력에서 '먹고 싶어', '땡겨', '해줘', '오늘' 같은 서술어나 불필요한 단어는 **모두 버리세요.**
+        2. 오직 **음식명, 식재료, 맛(매운, 달콤), 조리법(튀김, 찜)**과 관련된 핵심 단어만 남기세요.
+        3. [★중요★] 사용자가 '면류', '국물', '고기' 처럼 포괄적인 단어를 사용했다면, DB 검색이 잘 되도록 **구체적인 메뉴명으로 확장**해주세요.
+
+        [확장 예시]
+        - 입력: "면류가 먹고 싶어" -> 출력: "면 국수 파스타 라면 우동 스파게티 짬뽕 짜장면"
+        - 입력: "비 와서 국물 땡겨" -> 출력: "국물 탕 찌개 전골 국 따뜻한 얼큰한"
+        - 입력: "스트레스 받아서 매운거" -> 출력: "매운 매콤한 얼큰한 떡볶이 마라 불닭 닭발"
+        - 입력: "간단하게 먹고 싶어" -> 출력: "간편식 덮밥 볶음밥 토스트 샌드위치"
+
+        [출력 형식]
+        오직 공백으로 구분된 키워드만 한 줄로 출력하세요. (특수문자 제외)
+        """
+        
+        response = model.generate_content(prompt)
+        keywords = response.text.strip()
+        print(f"🔍 사용자 입력 '{user_input}' -> 키워드 추출: '{keywords}'")
+        return keywords
+        
+    except Exception as e:
+        print(f"❌ 키워드 추출 실패: {e}")
+        return ""
+    
+def get_smart_candidates(profile, filtered_recipes_df, top_n=100, dynamic_keywords=""):
+    """
+    (ML) 사용자 프로필 + [동적 키워드]와 가장 유사한 레시피 선정
+    """
+    print(f"🤖 (ML) '취향 저격' 후보군 선정을 시작합니다... (대상: {len(filtered_recipes_df)}개)")
+    
+    # [핵심 수정] 사용자 프로필 텍스트에 동적 키워드를 '가중치'로 추가
+    # (키워드를 3번 반복해서 넣어주면 검색 중요도가 확 올라갑니다)
+    user_text = profile['preferences'] + " " + profile['goals']
+    
+    if dynamic_keywords:
+        weighted_keywords = (dynamic_keywords + " ") * 3 # 가중치 3배 증폭
+        user_text += " " + weighted_keywords
+        print(f"✨ (ML) 동적 가중치 적용됨: {weighted_keywords}")
+    
+    # 2. 레시피 재료 텍스트 생성 (비교 대상)
+    # (이 작업은 수천~수만 건이므로 시간이 조금 걸릴 수 있음)
+    recipe_texts = filtered_recipes_df['ingredients_json'].apply(_extract_ingredients_text)
+    
+    if recipe_texts.empty:
+        print("⚠️ (ML) 재료 텍스트를 추출할 수 없습니다. 랜덤 샘플링으로 대체합니다.")
+        sample_size = min(top_n, len(filtered_recipes_df))
+        return filtered_recipes_df.sample(n=sample_size, random_state=42)
+        
+    # 3. TF-IDF 벡터화
+    try:
+        vectorizer = TfidfVectorizer()
+        
+        # 3-1. 레시피(재료) 전체로 TF-IDF 어휘 사전 학습
+        tfidf_matrix_recipes = vectorizer.fit_transform(recipe_texts)
+        
+        # 3-2. 사용자 프로필 텍스트를 동일한 어휘 사전으로 변환
+        tfidf_vector_user = vectorizer.transform([user_text])
+        
+        # 4. 코사인 유사도 계산
+        # (결과 shape: [1, num_recipes])
+        cosine_sims = cosine_similarity(tfidf_vector_user, tfidf_matrix_recipes)
+        
+        # 5. 유사도 점수가 가장 높은 top_n개의 *인덱스* 찾기
+        # [0]으로 1D 배열로 만들고, argsort로 정렬 후, 상위 top_n개 선택
+        # (유사도가 0인 레시피가 많을 수 있으므로, 실제 개수(len)와 top_n 중 작은 값을 택함)
+        num_candidates = min(top_n, len(cosine_sims[0]))
+        top_indices = np.argsort(cosine_sims[0])[-num_candidates:][::-1]
+        
+        # 6. 상위 top_n개 레시피 DataFrame 반환
+        smart_candidates_df = filtered_recipes_df.iloc[top_indices]
+        
+        print(f"✅ (ML) '취향 저격' 후보군 {len(smart_candidates_df)}개 선정 완료.")
+        return smart_candidates_df
+        
+    except Exception as e:
+        print(f"❌ (ML) TF-IDF/유사도 계산 실패: {e}. 랜덤 샘플링으로 대체합니다.")
+        sample_size = min(top_n, len(filtered_recipes_df))
+        return filtered_recipes_df.sample(n=sample_size, random_state=42)
+    
     
 # --- 6. 메인 코드 실행(api 호출 테스트용) ---
 
