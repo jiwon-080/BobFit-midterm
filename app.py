@@ -75,7 +75,7 @@ def add_user_to_db(profile_data):
     """
     query = """
     INSERT INTO users (username, preferences, restrictions_allergies, restrictions_other, goals, budget) 
-    VALUES (?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?)
     """
     conn = None
     try:
@@ -507,7 +507,7 @@ with tab2:
                 new_allergies_str, # 변환된 문자열
                 new_other_str,     # 변환된 문자열
                 new_goals_str,
-                int(new_budget)
+                int(new_budget) if new_budget else 0
             )
             
             # 5. DB 저장 함수 호출 (app.py 맨 끝에 이미 정의되어 있음)
