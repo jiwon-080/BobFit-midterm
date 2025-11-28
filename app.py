@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import json
+import time
 from datetime import date
 
 from dotenv import load_dotenv
@@ -143,65 +144,110 @@ with tab1:
             if profile:
                 st.session_state.recommendation = ""
                 st.session_state.tasks_checked = 0
-                st.session_state.votes = {} # [기능 3] 보팅 초기화
+                st.session_state.votes = {}
                 
-                with st.spinner("제약 조건을 필터링하고, AI가 사용자님의 기분을 분석하고 있습니다..."):
+                # [단계 1] 1차 필터링 (DB에서 안전한 레시피 거르기)
+                with st.spinner("1. 기본 데이터 필터링 중..."):
                     try:
-                        # 1. 1차 필터링 (기존 동일)
                         restrictions = backend.parse_restrictions(profile)
                         filtered_recipes = backend.recommend_recipes_by_filter(conn, profile, restrictions)
-                        
-                        if filtered_recipes.empty:
-                            st.error("1차 필터링 결과...")
-                        else:
-                            # -------------------------------------------------
-                            # [신규] 1. 자율 입력 분석
-                            # -------------------------------------------------
-                            dynamic_keywords = ""
-                            if free_text: # 사용자가 자율 입력을 썼다면
+                    except Exception as e:
+                        st.error(f"필터링 오류: {e}")
+                        filtered_recipes = pd.DataFrame()
+
+                if filtered_recipes.empty:
+                    st.error("1차 필터링 결과, 추천할 레시피가 없습니다.")
+                else:
+                    # [단계 2] NLP 키워드 추출 (★여기서 딱 한 번만 실행!★)
+                    dynamic_keywords = ""
+                    if free_text:
+                        with st.spinner("2. AI가 기분을 분석하는 중... 🧠"):
+                            try:
+                                # 여기서 추출한 'dynamic_keywords'를 아래에서 계속 씁니다.
                                 dynamic_keywords = backend.extract_keywords_with_gemini(
                                     backend.YOUR_API_KEY, 
                                     free_text
                                 )
                                 if dynamic_keywords:
-                                    st.toast(f"💡 분석된 키워드: {dynamic_keywords}")
-                            
-                            # -------------------------------------------------
-                            # [수정] 2. ML 후보군 선정 (키워드 전달)
-                            # -------------------------------------------------
-                            candidate_recipes = backend.get_smart_candidates(
+                                    st.toast(f"💡 키워드: {dynamic_keywords}")
+                                    time.sleep(1) # API 과부하 방지용 1초 휴식
+                            except Exception as e:
+                                print(f"키워드 추출 실패 (무시함): {e}")
+
+                    # [단계 3] 후보군 선정 (밸런싱 로직)
+                    with st.spinner("3. 최적의 후보군(ML) + 의외의 발견(Random) 선정 중..."):
+                        try:
+                            # A. [이성적 추천] 프로필 기반 (20개)
+                            candidates_base = backend.get_smart_candidates(
                                 profile, 
                                 filtered_recipes, 
-                                top_n=100,
-                                dynamic_keywords=dynamic_keywords # [전달]
+                                top_n=20, 
+                                dynamic_keywords="" 
                             )
                             
-                            # 3. 최종 Gemini 추천 (기존 동일)
-                            with st.spinner("Gemini API 호출 중... (AI가 식단 구성 중)"):
-                                # 3. 2차 (Gemini) 추천 (동일)
+                            # B. [감성적 추천] 동적 키워드 기반 (20개)
+                            candidates_mood = backend.get_smart_candidates(
+                                profile, 
+                                filtered_recipes, 
+                                top_n=20, 
+                                dynamic_keywords=dynamic_keywords 
+                            )
+                            
+                            # C. [의외성 추천] 완전 랜덤 (10개) - 킬링 파트!
+                            # (이미 A, B에서 뽑힌 건 제외하고 뽑아야 함)
+                            current_selected_ids = pd.concat([candidates_base, candidates_mood])['RCP_SNO']
+                            
+                            # A와 B에 없는 것들만 남김
+                            remaining_for_random = filtered_recipes[~filtered_recipes['RCP_SNO'].isin(current_selected_ids)]
+                            
+                            if not remaining_for_random.empty:
+                                # 남은 것 중 10개 랜덤 (부족하면 남은 거 다)
+                                random_count = min(10, len(remaining_for_random))
+                                candidates_random = remaining_for_random.sample(n=random_count, random_state=None) # random_state 없어야 매번 바뀜
+                            else:
+                                candidates_random = pd.DataFrame()
+
+                            # D. 최종 합치기 (20 + 20 + 10 = 50개)
+                            candidates_mixed = pd.concat([
+                                candidates_base, 
+                                candidates_mood, 
+                                candidates_random
+                            ]).drop_duplicates(subset=['RCP_SNO'])
+                            
+                            # (혹시라도 중복 제거 후 50개가 안 되면 채우는 안전장치)
+                            target_total = 50
+                            if len(candidates_mixed) < target_total:
+                                remaining = filtered_recipes[~filtered_recipes['RCP_SNO'].isin(candidates_mixed['RCP_SNO'])]
+                                if not remaining.empty:
+                                    fill_count = min(target_total - len(candidates_mixed), len(remaining))
+                                    fill = remaining.sample(n=fill_count, random_state=42)
+                                    candidates_mixed = pd.concat([candidates_mixed, fill])
+                            else:
+                                candidates_mixed = candidates_mixed.head(target_total)
+
+                            print(f"🚀 최종 Gemini 전송 개수: {len(candidates_mixed)}개 (취향20+기분20+랜덤10)")
+
+                            # [단계 4] 최종 Gemini 추천
+                            with st.spinner("4. AI 영양사가 식단을 작성 중입니다... 🥗"):
                                 recommendation_text = backend.get_gemini_recommendation(
                                     backend.YOUR_API_KEY, 
                                     profile,
-                                    candidate_recipes,
+                                    candidates_mixed,
                                     today_date_str, 
                                     mood,           
                                     free_text       
                                 )
                             
                             if recommendation_text:
-                                # 1. AI 텍스트(recommendation_text)를 session_state에 저장
                                 st.session_state.recommendation = recommendation_text
-                                
-                                # 2. 100개 후보군(candidates_df)을 session_state에 저장
-                                st.session_state.candidates_df = candidate_recipes
-                                
-                                # 3. "성공" 메시지는 화면에 그냥 표시 (저장 X)
+                                st.session_state.candidates_df = candidates_mixed
                                 st.success("AI 추천이 완료되었습니다!")
                             else:
                                 st.error("Gemini API 호출에 실패했습니다.")
                                 
-                    except Exception as e:
-                        st.error(f"추천 중 오류 발생: {e}")
+                        except Exception as e:
+                            st.error(f"추천 생성 중 오류: {e}")
+
             else:
                 st.error("프로필을 불러올 수 없습니다.")
 
@@ -220,11 +266,9 @@ with tab1:
             st.subheader("🔍 레시피 상세 정보 및 평가")
             
             # ⚠️ 중요: 데이터 한계 (열량/조리법 정보)
-            st.warning("""
-            현재 DB에는 '열량(칼로리)' 및 '상세 조리법' 데이터가 없습니다. 
-            (1단계 전처리 시, 원본 CSV에 해당 정보가 없었습니다.)
-            
-            데모에서는 주요 재료 정보(`ingredients_json`)를 대신 표시합니다.
+            st.info("""
+            ℹ️ **참고**: 레시피의 **열량(칼로리)** 정보는 AI가 재료를 기반으로 **자동 추정한 값**입니다.
+            실제 영양성분과는 다소 차이가 있을 수 있으니 참고용으로 활용해 주세요.
             """)
 
             # AI가 추천한 텍스트에 포함된 레시피(후보군 100개 중)만 찾아서 표시
@@ -260,21 +304,63 @@ with tab1:
                     if match_found and recipe_id not in displayed_sno:
                         displayed_sno.add(recipe_id)
                         
+                        # 칼로리 파싱
+                        import re
+                        original_cal_str = "정보 없음"
+                        
+                        try:
+                            # 1. 비교할 제목들 준비 (특수문자 이스케이프 처리)
+                            # AI가 원본 제목을 썼을 수도, 핵심 요리명만 썼을 수도 있음
+                            escaped_full_title = re.escape(recipe_title_full)
+                            escaped_clean_name = re.escape(clean_name)
+                            
+                            # 2. 정규표현식 패턴:
+                            # "제목" 뒤에 나오는 내용 중 가장 먼저 발견되는 "숫자+kcal" 패턴 찾기
+                            # [\d,]+ : 숫자와 쉼표(,)가 1개 이상 있음 (예: 1,000)
+                            # \s* : 공백이 0개 이상 있음
+                            # kcal   : 'kcal' 글자 (대소문자 무시)
+                            
+                            # 우선순위 1: 원본 제목 뒤에서 찾기
+                            pattern_1 = rf"{escaped_full_title}.*?([\d,]+\s*kcal)"
+                            match = re.search(pattern_1, rec_text, re.DOTALL | re.IGNORECASE)
+                            
+                            # 우선순위 2: 실패하면 핵심 요리명 뒤에서 찾기
+                            if not match:
+                                pattern_2 = rf"{escaped_clean_name}.*?([\d,]+\s*kcal)"
+                                match = re.search(pattern_2, rec_text, re.DOTALL | re.IGNORECASE)
+
+                            if match:
+                                original_cal_str = match.group(1) # "500 kcal" 또는 "1,000kcal" 추출
+                                
+                        except Exception as e:
+                            print(f"칼로리 파싱 에러: {e}")
+                        
                         with st.expander(f"**{recipe_title_full}** (상세보기)"):
                             
                             # (1) 재료 정보 표시
                             st.markdown("##### 🥑 주요 재료")
                             try:
                                 ingredients_dict = json.loads(row['ingredients_json'])
-                                st.dataframe(pd.Series(ingredients_dict), use_container_width=True)
+                                st.dataframe(pd.Series(ingredients_dict), width='stretch')
                             except:
                                 st.text(row['ingredients_json'])
+                                
+                            # (2) 조리법 (수정된 부분)
+                            st.markdown("##### 🍳 조리 순서")
                             
-                            # (2) 기타 정보 표시
+                            # [핵심] DB 확인 -> 없으면 생성 -> 저장 -> 반환
+                            with sqlite3.connect(backend.DB_PATH) as conn:
+                                steps_text = backend.get_or_create_recipe_steps(
+                                    conn, 
+                                    backend.YOUR_API_KEY,
+                                    recipe_id,
+                                    recipe_title_full,
+                                    row['ingredients_json']
+                                )
+                            st.write(steps_text) # 결과 출력
+                            
+                            # (3) 기타 정보 표시
                             st.markdown("#####  E.T.C")
-                            
-                            # [디버그 1 수정]
-                            # row['CKG_MTH_ACTO_NM'] -> row['CKG_TIME_NM']로 수정
                             st.text(f"조리법: {row['CKG_MTH_ACTO_NM']} | 소요시간: {row['CKG_TIME_NM']} | 인분: {row['CKG_INBUN_NM']}")
                             
                             # -------------------------------------------------------
@@ -314,7 +400,8 @@ with tab1:
                                             backend.YOUR_API_KEY,
                                             recipe_title_full,
                                             row['ingredients_json'],
-                                            final_request
+                                            final_request,
+                                            original_cal_str
                                         )
                                         
                                         if modified_result:
@@ -516,7 +603,7 @@ with tab3:
             if liked_recipes_df.empty:
                 st.write("아직 '좋아요' 한 레시피가 없습니다.")
             else:
-                st.dataframe(liked_recipes_df, use_container_width=True)
+                st.dataframe(liked_recipes_df, width='stretch')
 
         # --- 3. 나의 '달성 기록' ---
         with col2:
